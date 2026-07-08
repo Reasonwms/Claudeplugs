@@ -32,6 +32,8 @@ deltaVolMax   = input.float(-20.0, "Maximum Delta Volume % (must be <= this)", g
 grp_entry = "Entry / Risk"
 waitBars   = input.int(2, "Candles to Wait After Signal", minval = 1, group = grp_entry)
 rrMultiple = input.float(1.5, "Risk:Reward Multiple (TP = SL Distance x R)", group = grp_entry)
+minStopPct = input.float(0.25, "Min Stop Distance % of Entry Price", minval = 0.01, group = grp_entry)
+maxStopPct = input.float(2.0, "Max Stop Distance % of Entry Price", minval = 0.01, group = grp_entry)
 
 // ─── TWO-POLE OSCILLATOR ─────────────────────────────────────────────────
 float sma1   = ta.sma(close, 25)
@@ -119,12 +121,16 @@ if signalArmed
 // Fire the entry once the 2-candle wait has elapsed
 bool doEntry = signalArmed and barsSinceSignal == waitBars and strategy.position_size == 0
 if doEntry
-    float entryPrice = close
-    float slDistance = stopLevel - entryPrice
-    if slDistance > 0
-        float tpLevel = entryPrice - slDistance * rrMultiple
+    float entryPrice   = close
+    float rawDistance  = stopLevel - entryPrice
+    if rawDistance > 0
+        float minDistance = entryPrice * minStopPct / 100
+        float maxDistance = entryPrice * maxStopPct / 100
+        float slDistance  = math.max(minDistance, math.min(rawDistance, maxDistance))
+        float execStop    = entryPrice + slDistance
+        float execTP      = entryPrice - slDistance * rrMultiple
         strategy.entry("Short", strategy.short)
-        strategy.exit("Short Exit", "Short", stop = stopLevel, limit = tpLevel)
+        strategy.exit("Short Exit", "Short", stop = execStop, limit = execTP)
     signalArmed := false
 
 // Arm a new signal (only if nothing is currently pending)
