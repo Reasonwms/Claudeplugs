@@ -1,0 +1,141 @@
+//@version=6
+strategy("Two-Pole Oscillator + VIDYA Long Strategy", shorttitle = "TPO+VIDYA Long",
+     overlay = true, process_orders_on_close = true,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     initial_capital = 10000, currency = currency.USD,
+     commission_type = strategy.commission.percent, commission_value = 0.05,
+     slippage = 1)
+
+// ============================================================================
+// STRATEGY 1: Two-Pole Oscillator + VIDYA Trend Confirmation (LONG ONLY)
+//
+// Long Setup
+//   1) Two-Pole Oscillator prints a Buy Signal (blue arrow) below +0.5.
+//   2) VIDYA Ribbon is Green AND Delta Volume >= +threshold%.
+//   3) Wait 2 candles after the buy signal, enter at the close of candle #2.
+// Stop Loss: below the bullish invalidation level (low - avg range at signal).
+// Take Profit: R:R 1 : 1.5 -> TP = entry + (entry - SL) * 1.5
+// ============================================================================
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────
+grp_osc = "Two-Pole Oscillator"
+tpLength      = input.int(15, "Filter Length", group = grp_osc)
+buyLevelMax   = input.float(0.5, "Max Oscillator Level for Valid Buy Signal", group = grp_osc)
+
+grp_vidya = "Volumatic VIDYA"
+vidyaLength   = input.int(10, "VIDYA Length", group = grp_vidya)
+vidyaMomentum = input.int(20, "VIDYA Momentum", group = grp_vidya)
+bandDistance  = input.float(2.0, "ATR Band Distance", step = 0.1, group = grp_vidya)
+deltaVolMin   = input.float(20.0, "Minimum Delta Volume %", group = grp_vidya)
+
+grp_entry = "Entry / Risk"
+waitBars   = input.int(2, "Candles to Wait After Signal", minval = 1, group = grp_entry)
+rrMultiple = input.float(1.5, "Risk:Reward Multiple (TP = SL Distance x R)", group = grp_entry)
+
+// ─── TWO-POLE OSCILLATOR ─────────────────────────────────────────────────
+float sma1   = ta.sma(close, 25)
+float sma_n1 = ((close - sma1) - ta.sma(close - sma1, 25)) / ta.stdev(close - sma1, 25)
+float area   = ta.sma(high - low, 100)
+
+f_two_pole_filter(source, len) =>
+    var float smooth1 = na
+    var float smooth2 = na
+    alpha = 2.0 / (len + 1)
+    if na(smooth1)
+        smooth1 := source
+    else
+        smooth1 := (1 - alpha) * smooth1 + alpha * source
+    if na(smooth2)
+        smooth2 := smooth1
+    else
+        smooth2 := (1 - alpha) * smooth2 + alpha * smooth1
+    smooth2
+
+float two_p  = f_two_pole_filter(sma_n1, tpLength)
+float two_pp = two_p[4]
+
+bool buyRaw   = ta.crossover(two_p, two_pp) and barstate.isconfirmed
+bool buyValid = buyRaw and two_p < buyLevelMax
+
+// ─── VOLUMATIC VIDYA ─────────────────────────────────────────────────────
+vidya_calc(src, len, mom) =>
+    float momentum         = ta.change(src)
+    float sumPosMomentum   = math.sum(momentum >= 0 ? momentum : 0.0, mom)
+    float sumNegMomentum   = math.sum(momentum >= 0 ? 0.0 : -momentum, mom)
+    float absCmo           = math.abs(100 * (sumPosMomentum - sumNegMomentum) / (sumPosMomentum + sumNegMomentum))
+    float alpha            = 2 / (len + 1)
+    var float vidyaValue   = 0.0
+    vidyaValue := alpha * absCmo / 100 * src + (1 - alpha * absCmo / 100) * nz(vidyaValue[1])
+    ta.sma(vidyaValue, 15)
+
+float atrValue   = ta.atr(200)
+float vidyaValue = vidya_calc(close, vidyaLength, vidyaMomentum)
+float upperBand  = vidyaValue + atrValue * bandDistance
+float lowerBand  = vidyaValue - atrValue * bandDistance
+
+var bool  isTrendUp     = false
+var float smoothedValue = na
+
+if ta.crossover(close, upperBand)
+    isTrendUp := true
+if ta.crossunder(close, lowerBand)
+    isTrendUp := false
+
+smoothedValue := isTrendUp ? lowerBand : upperBand
+if ta.change(isTrendUp)
+    smoothedValue := na
+
+bool trendGreen = isTrendUp
+
+// Delta volume accumulated since the last trend flip
+var float upTrendVolume   = 0.0
+var float downTrendVolume = 0.0
+
+if ta.change(isTrendUp)
+    upTrendVolume   := 0.0
+    downTrendVolume := 0.0
+else
+    upTrendVolume   := upTrendVolume + (close > open ? volume : 0)
+    downTrendVolume := downTrendVolume + (close < open ? volume : 0)
+
+float avgVolumeDelta = (upTrendVolume + downTrendVolume) / 2
+float deltaVolumePct = avgVolumeDelta != 0 ? (upTrendVolume - downTrendVolume) / avgVolumeDelta * 100 : 0.0
+bool  deltaVolumeOK  = deltaVolumePct >= deltaVolMin
+
+// ─── ENTRY STATE MACHINE (2-candle delayed entry) ───────────────────────
+var bool  signalArmed     = false
+var int   barsSinceSignal = 0
+var float stopLevel       = na
+
+// Cancel a pending signal if price already broke the bullish invalidation level
+if signalArmed and low < stopLevel
+    signalArmed := false
+
+// Advance the countdown for an already-armed signal
+if signalArmed
+    barsSinceSignal += 1
+
+// Fire the entry once the 2-candle wait has elapsed
+bool doEntry = signalArmed and barsSinceSignal == waitBars and strategy.position_size == 0
+if doEntry
+    float entryPrice = close
+    float slDistance = entryPrice - stopLevel
+    if slDistance > 0
+        float tpLevel = entryPrice + slDistance * rrMultiple
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", "Long", stop = stopLevel, limit = tpLevel)
+    signalArmed := false
+
+// Arm a new signal (only if nothing is currently pending)
+if not signalArmed and buyValid and trendGreen and deltaVolumeOK and strategy.position_size == 0
+    signalArmed     := true
+    barsSinceSignal := 0
+    stopLevel       := low - area
+
+// ─── PLOTS ───────────────────────────────────────────────────────────────
+plot(smoothedValue, "VIDYA Trend", color = isTrendUp ? color.new(#17dfad, 0) : color.new(#dd326b, 0), linewidth = 2, style = plot.style_linebr)
+plotshape(buyValid, title = "Valid Buy Signal", style = shape.triangleup, location = location.belowbar, color = #55ffda, size = size.tiny)
+plotshape(doEntry, title = "Long Entry", style = shape.labelup, location = location.belowbar, color = color.new(color.green, 0), text = "LE", textcolor = color.white, size = size.small)
+
+alertcondition(buyValid, "Two-Pole Buy Signal (Long Strategy)", "Two-Pole Oscillator printed a valid buy signal below +0.5")
+alertcondition(doEntry, "Long Entry Triggered", "Two-Pole + VIDYA long entry triggered")
