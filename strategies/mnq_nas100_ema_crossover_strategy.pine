@@ -1,0 +1,207 @@
+//@version=6
+strategy("MNQ / NAS100 EMA Crossover Trend Strategy", shorttitle = "MNQ EMA X",
+     overlay = true, process_orders_on_close = true,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     initial_capital = 10000, currency = currency.USD,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.85,
+     slippage = 1, max_bars_back = 500)
+
+// ============================================================================
+// MNQ / NAS100 EMA Crossover Trend Strategy — 1H
+//
+// Long Entry
+//   1) 10 EMA crosses above 20 EMA
+//   2) Signal confirmed on bar close (default calc-on-bar-close + process_orders_on_close)
+//   3) 50 EMA > 200 EMA  (bullish trend alignment)
+//
+// Short Entry
+//   1) 10 EMA crosses below 20 EMA
+//   2) Signal confirmed on bar close
+//   3) 50 EMA < 200 EMA  (bearish trend alignment)
+//
+// Risk: fixed USD risk per trade sized off a 2x ATR(14) initial stop.
+// Stop management: hard initial stop at entry, then ATR chandelier trail.
+// Exit: opposite 10/20 EMA crossover closes the position outright.
+// Session: no restriction by default — all 24 hours tradable.
+// ============================================================================
+
+// ─── INPUTS ────────────────────────────────────────────────────────────────
+grp_ema = "① EMAs"
+emaFastLen      = input.int(10,  "Fast EMA (Signal)",  minval = 1, group = grp_ema)
+emaSlowLen      = input.int(20,  "Slow EMA (Signal)",  minval = 1, group = grp_ema)
+emaTrendFastLen = input.int(50,  "Fast EMA (Trend)",   minval = 1, group = grp_ema)
+emaTrendSlowLen = input.int(200, "Slow EMA (Trend)",   minval = 1, group = grp_ema)
+
+grp_dir = "② Trade Direction"
+allowLongs  = input.bool(true, "Enable Long Entries",  group = grp_dir)
+allowShorts = input.bool(true, "Enable Short Entries", group = grp_dir)
+
+grp_session = "③ Session (24h by default)"
+restrictSession = input.bool(false, "Restrict to Session Window", group = grp_session,
+     tooltip = "Off = trade all 24 hours (Asia + Europe + New York). Turn on to limit entries to the window below.")
+sessionWindow = input.session("0000-2400", "Session Window (exchange time)", group = grp_session)
+
+grp_risk = "④ Risk Management"
+riskUsd      = input.float(50.0, "Fixed Risk per Trade (USD)", minval = 1.0, group = grp_risk)
+atrLen       = input.int(14, "ATR Length", minval = 1, group = grp_risk)
+atrSlMult    = input.float(2.0, "Initial Stop — ATR Multiple", minval = 0.1, step = 0.1, group = grp_risk)
+atrTrailMult = input.float(2.0, "Trailing Stop — ATR Multiple", minval = 0.1, step = 0.1, group = grp_risk)
+pointValue   = input.float(2.0, "Point Value (USD per 1.0 price move / contract)", minval = 0.01, group = grp_risk,
+     tooltip = "MNQ = 2, NQ = 20, MES = 5, ES = 50. For NAS100 CFDs check your broker's per-point value per lot.")
+maxContracts = input.int(50, "Max Contracts per Trade (cap)", minval = 1, group = grp_risk)
+
+grp_bt = "⑤ Backtest Window"
+useDateFilter = input.bool(false, "Limit Backtest to Date Range", group = grp_bt)
+startDate     = input.time(timestamp("2020-01-01 00:00"), "Start", group = grp_bt)
+endDate       = input.time(timestamp("2099-01-01 00:00"), "End",   group = grp_bt)
+
+grp_disp = "⑥ Display"
+showDash = input.bool(true, "Show Strategy Report dashboard", group = grp_disp)
+
+// ─── DASHBOARD HELPERS — MUST be at global scope ─────────────────────────
+var table dash = na
+
+dashUsd(v) =>
+    (v >= 0 ? "+" : "-") + "USD " + str.tostring(math.round(math.abs(v)), "0")
+
+dashPct(v) =>
+    str.tostring(math.round(v * 10) / 10, "0.0") + "%"
+
+dashDec(v) =>
+    str.tostring(math.round(v * 100) / 100, "0.00")
+
+dashRow(r, lbl, val, tgt, vc) =>
+    table.cell(dash, 0, r, lbl, text_color = color.new(color.silver, 0),  text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, r, val, text_color = vc,                          text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 2, r, tgt, text_color = color.new(color.silver, 45), text_size = size.small, text_halign = text.align_right)
+
+f_contractsFromRisk(stopDistPts) =>
+    raw = stopDistPts > 0 and pointValue > 0 ? math.floor(riskUsd / (stopDistPts * pointValue)) : 1.0
+    math.max(1, math.min(raw, maxContracts))
+
+// ─── EMAs ──────────────────────────────────────────────────────────────────
+emaFast      = ta.ema(close, emaFastLen)
+emaSlow      = ta.ema(close, emaSlowLen)
+emaTrendFast = ta.ema(close, emaTrendFastLen)
+emaTrendSlow = ta.ema(close, emaTrendSlowLen)
+
+// ─── SESSION FILTER ──────────────────────────────────────────────────────
+inSession = not restrictSession or not na(time(timeframe.period, sessionWindow))
+inDateRange = not useDateFilter or (time >= startDate and time <= endDate)
+
+// ─── CONDITIONS ────────────────────────────────────────────────────────────
+bullCross = ta.crossover(emaFast, emaSlow)
+bearCross = ta.crossunder(emaFast, emaSlow)
+trendUp   = emaTrendFast > emaTrendSlow
+trendDown = emaTrendFast < emaTrendSlow
+
+longSignal  = allowLongs  and bullCross and trendUp   and inSession and inDateRange and barstate.isconfirmed and strategy.position_size == 0
+shortSignal = allowShorts and bearCross and trendDown and inSession and inDateRange and barstate.isconfirmed and strategy.position_size == 0
+
+// ─── RISK / ATR ──────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+
+var float longStop  = na
+var float shortStop = na
+
+wasLong  = strategy.position_size[1] > 0
+wasShort = strategy.position_size[1] < 0
+
+// ─── ENTRIES ───────────────────────────────────────────────────────────────
+if longSignal
+    slDist = atr * atrSlMult
+    longStop := close - slDist
+    qty = f_contractsFromRisk(slDist)
+    strategy.entry("Long", strategy.long, qty = qty, comment = "EMA10x20 Up")
+else if strategy.position_size > 0 and wasLong
+    longStop := math.max(longStop, close - atr * atrTrailMult)
+
+if shortSignal
+    slDist = atr * atrSlMult
+    shortStop := close + slDist
+    qty = f_contractsFromRisk(slDist)
+    strategy.entry("Short", strategy.short, qty = qty, comment = "EMA10x20 Down")
+else if strategy.position_size < 0 and wasShort
+    shortStop := math.min(shortStop, close + atr * atrTrailMult)
+
+// ─── EXIT ON OPPOSITE EMA CROSSOVER ─────────────────────────────────────────
+if strategy.position_size > 0 and bearCross and barstate.isconfirmed
+    strategy.close("Long", comment = "EMA Cross Exit")
+if strategy.position_size < 0 and bullCross and barstate.isconfirmed
+    strategy.close("Short", comment = "EMA Cross Exit")
+
+// ─── STOP-LOSS / ATR TRAIL ORDERS ────────────────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry = "Long", stop = longStop, comment_loss = "SL/Trail")
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry = "Short", stop = shortStop, comment_loss = "SL/Trail")
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────
+alertcondition(longSignal,               title = "Long Entry",  message = "MNQ/NAS100 Long — 10/20 EMA bull cross, trend up — {{ticker}} @ {{close}}")
+alertcondition(shortSignal,              title = "Short Entry", message = "MNQ/NAS100 Short — 10/20 EMA bear cross, trend down — {{ticker}} @ {{close}}")
+alertcondition(inLong and bearCross,     title = "Long Exit",   message = "Long exit — opposite EMA cross — {{ticker}} @ {{close}}")
+alertcondition(inShort and bullCross,    title = "Short Exit",  message = "Short exit — opposite EMA cross — {{ticker}} @ {{close}}")
+
+// ─── PLOTS ─────────────────────────────────────────────────────────────────
+plot(emaFast,      "EMA 10",  color = color.new(#2962ff, 0), linewidth = 1)
+plot(emaSlow,       "EMA 20", color = color.new(#ff6d00, 0), linewidth = 1)
+plot(emaTrendFast, "EMA 50",  color = color.new(#43a047, 0), linewidth = 2)
+plot(emaTrendSlow, "EMA 200", color = color.new(#e91e63, 0), linewidth = 2)
+
+plotshape(longSignal,  title = "Long Entry",  style = shape.triangleup,   location = location.belowbar, color = color.new(color.lime, 0), size = size.small)
+plotshape(shortSignal, title = "Short Entry", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0),  size = size.small)
+
+plot(inLong  ? longStop  : na, "Long Stop",  color = color.new(color.red, 20),  style = plot.style_linebr, linewidth = 1)
+plot(inShort ? shortStop : na, "Short Stop", color = color.new(color.red, 20),  style = plot.style_linebr, linewidth = 1)
+
+bgcolor(trendUp ? color.new(color.green, 93) : trendDown ? color.new(color.red, 93) : na, title = "Trend Background")
+
+// ─── STRATEGY REPORT DASHBOARD ─────────────────────────────────────────────
+if showDash and barstate.islast
+    tot  = strategy.closedtrades
+    wins = strategy.wintrades
+    loss = strategy.losstrades
+    np   = strategy.netprofit
+    gp   = strategy.grossprofit
+    gl   = strategy.grossloss
+    dd   = strategy.max_drawdown
+    wr   = tot  > 0  ? wins / tot * 100   : 0.0
+    pf   = gl   != 0 ? math.abs(gp / gl)  : 0.0
+    aw   = wins > 0  ? gp / wins          : 0.0
+    al   = loss > 0  ? gl / loss          : 0.0
+    at   = tot  > 0  ? np / tot           : 0.0
+    lr   = tot  > 0  ? loss / tot         : 0.0
+    exp  = wr / 100 * aw + lr * al
+    rr   = al   != 0 ? math.abs(aw / al)  : 0.0
+    ddp  = strategy.initial_capital > 0 ? math.abs(dd) / strategy.initial_capital * 100 : 0.0
+
+    dash := table.new(position.bottom_right, 3, 15,
+         bgcolor = color.new(color.black, 55), border_color = color.new(color.gray, 50),
+         border_width = 1, frame_color = color.new(color.gray, 30), frame_width = 1)
+
+    cG = color.new(color.lime, 0)
+    cR = color.new(color.red, 0)
+    cH = color.new(#111827, 0)
+    cS = color.new(color.silver, 0)
+
+    table.cell(dash, 0, 0, "STRATEGY REPORT", text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_left)
+    table.cell(dash, 1, 0, "VALUE",           text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_right)
+    table.cell(dash, 2, 0, "TARGET",          text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_right)
+
+    dashRow(1,  "Net Profit",    dashUsd(np),                   "> 0",     np  >= 0   ? cG : cR)
+    dashRow(2,  "Gross Profit",  dashUsd(gp),                   "---",     cG)
+    dashRow(3,  "Gross Loss",    dashUsd(gl),                   "---",     cR)
+    dashRow(4,  "Total Trades",  str.tostring(tot),             "> 30",    tot >= 30  ? cG : cR)
+    dashRow(5,  "Win Rate",      dashPct(wr),                   "> 40%",   wr  >= 40  ? cG : cR)
+    dashRow(6,  "Profit Factor", dashDec(pf),                   "> 1.5",   pf  >= 1.5 ? cG : cR)
+    dashRow(7,  "Avg Win",       dashUsd(aw),                   "---",     cG)
+    dashRow(8,  "Avg Loss",      dashUsd(al),                   "---",     cR)
+    dashRow(9,  "Avg Trade",     dashUsd(at),                   "> 0",     at  >= 0   ? cG : cR)
+    dashRow(10, "Achieved RR",   dashDec(rr) + ":1",            "> 1.5:1", rr  >= 1.5 ? cG : cR)
+    dashRow(11, "Expectancy",    dashUsd(exp),                  "> 0",     exp >= 0   ? cG : cR)
+    dashRow(12, "Max DD",        dashUsd(math.abs(dd)),         "---",     cR)
+    dashRow(13, "Max DD %",      dashPct(ddp),                  "< 20%",   ddp <= 20  ? cG : cR)
+    dashRow(14, "Open P&L",      dashUsd(strategy.openprofit),  "---",     strategy.openprofit >= 0 ? cG : cR)
