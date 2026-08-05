@@ -1,0 +1,169 @@
+//@version=6
+strategy("EMA 10/20 Cross + 50/200 Trend Filter — MNQ/NAS100", shorttitle = "EMA X-Trend",
+     overlay = true, process_orders_on_close = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10.0,
+     initial_capital = 10000, currency = currency.USD,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5,
+     slippage = 2)
+
+// ============================================================================
+// MNQ Futures / NAS100 — EMA Cross + Trend Filter Strategy
+// Intended timeframe: 1 Hour
+//
+// Long Entry
+//   1) 10 EMA crosses above 20 EMA.
+//   2) Candle closes to confirm the crossover (orders fill on bar close).
+//   3) 50 EMA > 200 EMA (bullish trend alignment).
+// Short Entry (mirror)
+//   1) 10 EMA crosses below 20 EMA.
+//   2) Candle closes to confirm the crossover.
+//   3) 50 EMA < 200 EMA (bearish trend alignment).
+//
+// Exit: ATR-based stop loss and take profit, optional ATR trailing stop.
+// Sizing: fixed % of equity per trade.
+// ============================================================================
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────
+grp_trend = "EMA Trend Filter"
+fastLen = input.int(10,  "Fast EMA Length",  group = grp_trend)
+slowLen = input.int(20,  "Slow EMA Length",  group = grp_trend)
+midLen  = input.int(50,  "Mid EMA Length (Trend)",  group = grp_trend)
+longLen = input.int(200, "Long EMA Length (Trend)", group = grp_trend)
+
+grp_entry = "Entry"
+enableLongs  = input.bool(true, "Enable Long Entries",  group = grp_entry)
+enableShorts = input.bool(true, "Enable Short Entries", group = grp_entry)
+
+grp_risk = "Risk (ATR)"
+atrLen    = input.int(14,    "ATR Length",         minval = 1, group = grp_risk)
+slMult    = input.float(1.5, "Stop Loss ATR x",    minval = 0.1, step = 0.1, group = grp_risk)
+tpMult    = input.float(3.0, "Take Profit ATR x",  minval = 0.1, step = 0.1, group = grp_risk)
+useTrail  = input.bool(false, "Enable ATR Trailing Stop", group = grp_risk)
+trailMult = input.float(2.0, "Trail ATR x",        minval = 0.1, step = 0.1, group = grp_risk)
+
+// ─── EMAs ────────────────────────────────────────────────────────────────
+float ema10  = ta.ema(close, fastLen)
+float ema20  = ta.ema(close, slowLen)
+float ema50  = ta.ema(close, midLen)
+float ema200 = ta.ema(close, longLen)
+float atrVal = ta.atr(atrLen)
+
+// ─── CONDITIONS ──────────────────────────────────────────────────────────
+bool bullTrend = ema50 > ema200
+bool bearTrend = ema50 < ema200
+bool crossUp   = ta.crossover(ema10, ema20)
+bool crossDn   = ta.crossunder(ema10, ema20)
+
+bool longOK  = enableLongs  and crossUp and bullTrend and strategy.position_size == 0
+bool shortOK = enableShorts and crossDn and bearTrend and strategy.position_size == 0
+
+// ─── ENTRIES / ATR EXITS ─────────────────────────────────────────────────
+var float activeSL = na
+var float activeTP = na
+
+if longOK
+    activeSL := close - atrVal * slMult
+    activeTP := close + atrVal * tpMult
+    strategy.entry("Long", strategy.long, comment = "EMA 10x20 Up, 50>200")
+    strategy.exit("Long Exit", from_entry = "Long",
+         stop = activeSL, limit = activeTP,
+         trail_price  = useTrail ? activeTP : na,
+         trail_offset = useTrail ? math.round(atrVal * trailMult / syminfo.mintick) : na,
+         comment_loss = "SL", comment_profit = "TP")
+
+if shortOK
+    activeSL := close + atrVal * slMult
+    activeTP := close - atrVal * tpMult
+    strategy.entry("Short", strategy.short, comment = "EMA 10x20 Down, 50<200")
+    strategy.exit("Short Exit", from_entry = "Short",
+         stop = activeSL, limit = activeTP,
+         trail_price  = useTrail ? activeTP : na,
+         trail_offset = useTrail ? math.round(atrVal * trailMult / syminfo.mintick) : na,
+         comment_loss = "SL", comment_profit = "TP")
+
+bool inLong  = strategy.position_size > 0
+bool inShort = strategy.position_size < 0
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────
+alertcondition(longOK,  title = "Long Entry",  message = "EMA 10/20 bull cross + 50>200 — {{ticker}} @ {{close}}")
+alertcondition(shortOK, title = "Short Entry", message = "EMA 10/20 bear cross + 50<200 — {{ticker}} @ {{close}}")
+
+// ─── PLOTS ───────────────────────────────────────────────────────────────
+plot(ema10,  "EMA 10",  color = color.new(#2962ff, 0), linewidth = 1)
+plot(ema20,  "EMA 20",  color = color.new(#ff6d00, 0), linewidth = 1)
+plot(ema50,  "EMA 50",  color = color.new(#e0e0e0, 0), linewidth = 2)
+plot(ema200, "EMA 200", color = color.new(#ab47bc, 0), linewidth = 2)
+
+plotshape(longOK,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.new(color.green, 0), text = "L", textcolor = color.white, size = size.small)
+plotshape(shortOK, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.new(color.red, 0),   text = "S", textcolor = color.white, size = size.small)
+
+plot(inLong or inShort ? activeSL : na, "Active SL", color = color.new(color.red, 20),  style = plot.style_linebr, linewidth = 1)
+plot(inLong or inShort ? activeTP : na, "Active TP", color = color.new(color.lime, 20), style = plot.style_linebr, linewidth = 1)
+
+bgcolor(bullTrend ? color.new(color.green, 93) : bearTrend ? color.new(color.red, 93) : na, title = "Trend Background")
+
+// ─── STRATEGY REPORT DASHBOARD ────────────────────────────────────────────
+var table dash = na
+
+dashUsd(v) =>
+    (v >= 0 ? "+" : "-") + "USD " + str.tostring(math.round(math.abs(v)), "0")
+
+dashPct(v) =>
+    str.tostring(math.round(v * 10) / 10, "0.0") + "%"
+
+dashDec(v) =>
+    str.tostring(math.round(v * 100) / 100, "0.00")
+
+dashRow(r, lbl, val, tgt, vc) =>
+    table.cell(dash, 0, r, lbl, text_color = color.new(color.silver, 0),  text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, r, val, text_color = vc,                          text_size = size.small, text_halign = text.align_right)
+    table.cell(dash, 2, r, tgt, text_color = color.new(color.silver, 45), text_size = size.small, text_halign = text.align_right)
+
+showDash = input.bool(true, "Show Strategy Report dashboard", group = "Display")
+
+if showDash and barstate.islast
+    tot  = strategy.closedtrades
+    wins = strategy.wintrades
+    loss = strategy.losstrades
+    np   = strategy.netprofit
+    gp   = strategy.grossprofit
+    gl   = strategy.grossloss
+    dd   = strategy.max_drawdown
+    wr   = tot  > 0  ? wins / tot * 100   : 0.0
+    pf   = gl   != 0 ? math.abs(gp / gl)  : 0.0
+    aw   = wins > 0  ? gp / wins          : 0.0
+    al   = loss > 0  ? gl / loss          : 0.0
+    at   = tot  > 0  ? np / tot           : 0.0
+    lr   = tot  > 0  ? loss / tot         : 0.0
+    exp  = wr / 100 * aw + lr * al
+    rr   = al   != 0 ? math.abs(aw / al)  : 0.0
+    ddp  = strategy.initial_capital > 0 ? math.abs(dd) / strategy.initial_capital * 100 : 0.0
+
+    dash := table.new(position.bottom_right, 3, 15,
+         bgcolor = color.new(color.black, 55), border_color = color.new(color.gray, 50),
+         border_width = 1, frame_color = color.new(color.gray, 30), frame_width = 1)
+
+    cG = color.new(color.lime, 0)
+    cR = color.new(color.red, 0)
+    cH = color.new(#111827, 0)
+    cS = color.new(color.silver, 0)
+
+    table.cell(dash, 0, 0, "STRATEGY REPORT", text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_left)
+    table.cell(dash, 1, 0, "VALUE",           text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_right)
+    table.cell(dash, 2, 0, "TARGET",          text_color = cS, text_size = size.small, bgcolor = cH, text_halign = text.align_right)
+
+    dashRow(1,  "Net Profit",    dashUsd(np),           "> 0",     np  >= 0   ? cG : cR)
+    dashRow(2,  "Gross Profit",  dashUsd(gp),           "---",     cG)
+    dashRow(3,  "Gross Loss",    dashUsd(gl),           "---",     cR)
+    dashRow(4,  "Total Trades",  str.tostring(tot),     "> 30",    tot >= 30  ? cG : cR)
+    dashRow(5,  "Win Rate",      dashPct(wr),           "> 40%",   wr  >= 40  ? cG : cR)
+    dashRow(6,  "Profit Factor", dashDec(pf),           "> 1.5",   pf  >= 1.5 ? cG : cR)
+    dashRow(7,  "Avg Win",       dashUsd(aw),           "---",     cG)
+    dashRow(8,  "Avg Loss",      dashUsd(al),           "---",     cR)
+    dashRow(9,  "Avg Trade",     dashUsd(at),           "> 0",     at  >= 0   ? cG : cR)
+    dashRow(10, "Achieved RR",   dashDec(rr) + ":1",    "> 1.5:1", rr  >= 1.5 ? cG : cR)
+    dashRow(11, "Expectancy",    dashUsd(exp),          "> 0",     exp >= 0   ? cG : cR)
+    dashRow(12, "Max DD",        dashUsd(math.abs(dd)), "---",     cR)
+    dashRow(13, "Max DD %",      dashPct(ddp),          "< 20%",   ddp <= 20  ? cG : cR)
+    dashRow(14, "Open P&L",      dashUsd(strategy.openprofit), "---", strategy.openprofit >= 0 ? cG : cR)
