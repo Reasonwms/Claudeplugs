@@ -67,7 +67,7 @@ if longOK
     activeTP := close + atrVal * tpMult
     strategy.entry("Long", strategy.long, comment = "EMA 10x20 Up, 50>200")
     strategy.exit("Long Exit", from_entry = "Long",
-         stop = activeSL, limit = activeTP,
+         stop = activeSL, limit = useTrail ? na : activeTP,
          trail_price  = useTrail ? activeTP : na,
          trail_offset = useTrail ? math.round(atrVal * trailMult / syminfo.mintick) : na,
          comment_loss = "SL", comment_profit = "TP")
@@ -77,7 +77,7 @@ if shortOK
     activeTP := close - atrVal * tpMult
     strategy.entry("Short", strategy.short, comment = "EMA 10x20 Down, 50<200")
     strategy.exit("Short Exit", from_entry = "Short",
-         stop = activeSL, limit = activeTP,
+         stop = activeSL, limit = useTrail ? na : activeTP,
          trail_price  = useTrail ? activeTP : na,
          trail_offset = useTrail ? math.round(atrVal * trailMult / syminfo.mintick) : na,
          comment_loss = "SL", comment_profit = "TP")
@@ -136,7 +136,7 @@ if showDash and barstate.islast
     al   = loss > 0  ? gl / loss          : 0.0
     at   = tot  > 0  ? np / tot           : 0.0
     lr   = tot  > 0  ? loss / tot         : 0.0
-    exp  = wr / 100 * aw + lr * al
+    exp  = wr / 100 * aw - lr * al
     rr   = al   != 0 ? math.abs(aw / al)  : 0.0
     ddp  = strategy.initial_capital > 0 ? math.abs(dd) / strategy.initial_capital * 100 : 0.0
 
